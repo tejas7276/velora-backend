@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -26,13 +27,9 @@ public class AuthService {
     private final UserRepository  userRepository;
     private final JwtUtil         jwtUtil;
     private final PasswordEncoder passwordEncoder;
-    private final EmailService    emailService;
+    private final Optional<EmailService> emailService;
 
-    // In-memory OTP store: email → [code, expiryMs]
-    // Fine for single-instance. For multi-instance: use Redis.
     private final Map<String, long[]> otpStore = new ConcurrentHashMap<>();
-
-    // ── REGISTER ──────────────────────────────────────────────────────────────
 
     @Transactional
     public AuthResponse register(RegisterRequest request) {
@@ -49,14 +46,14 @@ public class AuthService {
         User saved = userRepository.save(user);
         log.info("New user registered: {}", saved.getEmail());
 
-        // Send welcome email (async — never blocks registration)
-        emailService.sendWelcome(saved.getEmail(), saved.getName());
+        // ✅ FIXED
+        emailService.ifPresent(s ->
+                s.sendWelcome(saved.getEmail(), saved.getName())
+        );
 
         String token = jwtUtil.generateToken(saved.getId(), saved.getEmail());
         return new AuthResponse(token, saved.getId(), saved.getName(), saved.getEmail());
     }
-
-    // ── LOGIN ─────────────────────────────────────────────────────────────────
 
     @Transactional(readOnly = true)
     public AuthResponse login(LoginRequest request) {
@@ -70,21 +67,21 @@ public class AuthService {
         return new AuthResponse(token, user.getId(), user.getName(), user.getEmail());
     }
 
-    // ── FORGOT PASSWORD ───────────────────────────────────────────────────────
-
     @Transactional(readOnly = true)
     public void forgotPassword(String email) {
-        // Always succeed — never reveal if email exists (prevents user enumeration)
         userRepository.findByEmail(email).ifPresent(user -> {
             String code   = String.valueOf(100000 + new Random().nextInt(900000));
-            long   expiry = System.currentTimeMillis() + 15 * 60 * 1000L; // 15 min
+            long   expiry = System.currentTimeMillis() + 15 * 60 * 1000L;
             otpStore.put(email.toLowerCase(), new long[]{Long.parseLong(code), expiry});
-            emailService.sendForgotPassword(email, user.getName(), code);
+
+            // ✅ FIXED
+            emailService.ifPresent(s ->
+                    s.sendForgotPassword(email, user.getName(), code)
+            );
+
             log.info("OTP sent to {} (expires in 15 min)", email);
         });
     }
-
-    // ── RESET PASSWORD ────────────────────────────────────────────────────────
 
     @Transactional
     public void resetPassword(String email, String code, String newPassword) {
