@@ -23,6 +23,7 @@ RUN ./mvnw dependency:go-offline -q
 
 # Now copy source and build
 COPY src ./src
+RUN chmod +x mvnw
 RUN ./mvnw clean package -DskipTests -q
 
 # ── Stage 2: Run ────────────────────────────────────────────────
