@@ -1,6 +1,5 @@
 package com.velora.aijobflow.service;
 
-import jakarta.annotation.PostConstruct;
 import jakarta.mail.internet.MimeMessage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,33 +10,22 @@ import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
 
 /**
- * ═══════════════════════════════════════════════════════════════════
- *  EmailService  —  Crash-safe, production-ready
- * ═══════════════════════════════════════════════════════════════════
+ * EmailService — startup-safe, production-ready.
  *
- *  FIX 1: @ConditionalOnProperty
- *  Bean only created when spring.mail.host=smtp.gmail.com is present.
- *  If mail config is missing/wrong on any environment → bean is
- *  skipped gracefully. App starts. Email just doesn't send.
- *  Eliminates the JavaMailSender startup crash permanently.
+ * JavaMailSender is injected as optional (required = false).
+ * If mail is not configured → send() logs a warning and returns.
+ * App ALWAYS starts regardless of mail configuration.
  *
- *  FIX 2: @Autowired constructor (replaced @RequiredArgsConstructor)
- *  Works correctly with @ConditionalOnProperty.
- *
- *  FIX 3: Welcome email CTA uses real frontend URL via env var.
- *  No more hardcoded localhost:5173 in production emails.
- *
- *  ADD TO application.properties:
- *    app.frontend.url=${APP_FRONTEND_URL:https://your-frontend.onrender.com}
- *
- *  ADD TO Render env vars:
- *    APP_FRONTEND_URL = https://your-actual-frontend-url.com
+ * No @ConditionalOnProperty needed — optional injection is cleaner
+ * and avoids the AuthService "bean not found" crash entirely.
  */
 @Slf4j
 @Service
 public class EmailService {
 
-    private final JavaMailSender mailSender;
+    // required = false → app starts even if JavaMailSender bean doesn't exist
+    @Autowired(required = false)
+    private JavaMailSender mailSender;
 
     @Value("${app.email.from:noreply@velora.ai}")
     private String fromAddress;
@@ -47,22 +35,6 @@ public class EmailService {
 
     @Value("${app.frontend.url:https://velora.onrender.com}")
     private String frontendUrl;
-
-    @Autowired
-    public EmailService(JavaMailSender mailSender) {
-        this.mailSender = mailSender;
-    }
-
-    @PostConstruct
-    public void init() {
-        try {
-            JavaMailSenderImpl impl = (JavaMailSenderImpl) mailSender;
-            log.info("MailSender ready — host={} port={} user={}",
-                impl.getHost(), impl.getPort(), impl.getUsername());
-        } catch (Exception e) {
-            log.warn("MailSender init check failed: {}", e.getMessage());
-        }
-    }
 
     // ── PUBLIC ────────────────────────────────────────────────────────────────
 
@@ -78,6 +50,10 @@ public class EmailService {
     // ── PRIVATE ───────────────────────────────────────────────────────────────
 
     private void send(String to, String subject, String html) {
+        if (mailSender == null) {
+            log.warn("Email skipped — JavaMailSender not configured. To: {} | Subject: {}", to, subject);
+            return;
+        }
         try {
             MimeMessage msg = mailSender.createMimeMessage();
             MimeMessageHelper h = new MimeMessageHelper(msg, true, "UTF-8");
@@ -162,7 +138,8 @@ public class EmailService {
                "box-shadow:0 4px 24px rgba(0,0,0,0.08);'>" +
                heroBlock +
                "<div style='padding:32px 36px;'>" + body + "</div>" +
-               (cta.isEmpty() ? "" : "<div style='padding:0 36px 32px;text-align:center;'>" + cta + "</div>") +
+               (cta.isEmpty() ? "" :
+                   "<div style='padding:0 36px 32px;text-align:center;'>" + cta + "</div>") +
                "</td></tr>" +
                "<tr><td style='padding:20px 0 0;text-align:center;" +
                "color:#9ca3af;font-size:12px;line-height:1.8;'>" +
