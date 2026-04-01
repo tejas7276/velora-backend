@@ -5,7 +5,6 @@ import jakarta.mail.internet.MimeMessage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
 import org.springframework.mail.javamail.MimeMessageHelper;
@@ -36,12 +35,11 @@ import org.springframework.stereotype.Service;
  */
 @Slf4j
 @Service
-@ConditionalOnProperty(name = "spring.mail.host", havingValue = "smtp.gmail.com")
 public class EmailService {
 
     private final JavaMailSender mailSender;
 
-    @Value("${app.email.from}")
+    @Value("${app.email.from:noreply@velora.ai}")
     private String fromAddress;
 
     @Value("${app.email.from-name:Velora}")
