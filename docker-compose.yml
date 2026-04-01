@@ -1,0 +1,89 @@
+
+version: '3.9'
+
+services:
+
+  # ── 1. PostgreSQL ────────────────────────────────────────────────
+  # ELI5: The database — stores all your jobs, users, results.
+  # Like a spreadsheet that never crashes.
+  postgres:
+    image: postgres:15-alpine
+    container_name: velora-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       velora
+      POSTGRES_USER:     jobflowuser
+      POSTGRES_PASSWORD: 1234
+    ports:
+      - "5432:5432"           # your app talks to localhost:5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # data survives restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobflowuser -d velora"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── 2. RabbitMQ ──────────────────────────────────────────────────
+  # ELI5: The post office — jobs go in as letters,
+  # workers pick them up one by one in order.
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: velora-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"       # app connects here
+      - "15672:15672"     # open browser → localhost:15672 to see the queue dashboard
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── 3. Spring Boot App ───────────────────────────────────────────
+  # ELI5: Your actual backend — the brain of the system.
+  # It waits for postgres and rabbitmq to be ready before starting.
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: velora-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Database
+      SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/velora
+      SPRING_DATASOURCE_USERNAME: jobflowuser
+      SPRING_DATASOURCE_PASSWORD: 1234
+      # RabbitMQ
+      SPRING_RABBITMQ_HOST:       rabbitmq
+      SPRING_RABBITMQ_PORT:       5672
+      SPRING_RABBITMQ_USERNAME:   guest
+      SPRING_RABBITMQ_PASSWORD:   guest
+      # Secrets (override these in production)
+      JWT_SECRET:     ${JWT_SECRET:-velora-aijobflow-secret-key-2026}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-your-groq-api-key-here}
+      # Mail (set your real values here or in .env file)
+      SPRING_MAIL_USERNAME: ${MAIL_USERNAME:-your@gmail.com}
+      SPRING_MAIL_PASSWORD: ${MAIL_PASSWORD:-your-app-password}
+    ports:
+      - "8001:8001"
+    volumes:
+      - uploads_data:/app/uploads   # PDF uploads persist across restarts
+
+# ── Named volumes ────────────────────────────────────────────────────
+# ELI5: These are like USB drives that Docker keeps safe.
+# Even if you restart containers, data is not lost.
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  uploads_data:

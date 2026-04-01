@@ -1,0 +1,37 @@
+# ── Secrets ──────────────────────────────────────────────────────
+.env
+*.env.local
+*.env.production
+ 
+# ── Java / Maven ─────────────────────────────────────────────────
+target/
+*.jar
+*.war
+*.class
+.mvn/wrapper/maven-wrapper.jar
+ 
+# ── IDE ──────────────────────────────────────────────────────────
+.idea/
+*.iml
+.vscode/
+*.suo
+*.user
+ 
+# ── Uploads (user files, can be large) ───────────────────────────
+uploads/
+uploads-test/
+ 
+# ── OS ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ 
+# ── Node / React ─────────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+ 
+# ── Logs ─────────────────────────────────────────────────────────
+*.log
+logs/
+ 
+application.properties
