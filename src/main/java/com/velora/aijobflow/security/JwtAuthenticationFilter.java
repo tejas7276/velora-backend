@@ -40,7 +40,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     // These paths skip JWT validation entirely — no token needed
     private static final List<AntPathRequestMatcher> PUBLIC_PATHS = List.of(
-        new AntPathRequestMatcher("/auth/**"),
+        new AntPathRequestMatcher("/api/auth/**"),
         new AntPathRequestMatcher("/v3/api-docs/**"),
         new AntPathRequestMatcher("/swagger-ui/**"),
         new AntPathRequestMatcher("/swagger-ui.html"),
