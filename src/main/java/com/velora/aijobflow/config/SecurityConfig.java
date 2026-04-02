@@ -2,6 +2,7 @@ package com.velora.aijobflow.config;
 
 import com.velora.aijobflow.security.JwtAuthenticationFilter;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -24,6 +25,24 @@ public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
+    @Value("${app.frontend.url:http://localhost:5173}")
+    private String frontendUrl;
+
+    // Public endpoints — JWT filter must skip these entirely
+    private static final String[] PUBLIC_ENDPOINTS = {
+        "/auth/register",
+        "/auth/login",
+        "/auth/forgot-password",
+        "/auth/reset-password",
+        "/auth/verify-otp",
+        "/auth/refresh-token",
+        "/v3/api-docs/**",
+        "/swagger-ui/**",
+        "/swagger-ui.html",
+        "/actuator/**",
+        "/actuator/health"
+    };
+
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
@@ -31,13 +50,8 @@ public class SecurityConfig {
             .csrf(csrf -> csrf.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                    .requestMatchers("/auth/**",
-                        "/v3/api-docs/**",
-                        "/swagger-ui/**",
-                        "/swagger-ui.html",
-                        "/actuator/**").permitAll()
-                    // Everything else requires a valid JWT
-                    .anyRequest().authenticated()
+                .requestMatchers(PUBLIC_ENDPOINTS).permitAll()
+                .anyRequest().authenticated()
             )
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
@@ -47,10 +61,28 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOriginPatterns(List.of("*"));
-        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(List.of("*"));
+
+        // Explicit origins — required when allowCredentials=true
+        // allowedOriginPatterns("*") with credentials=true is the safest approach
+        config.setAllowedOriginPatterns(List.of(
+            "http://localhost:5173",
+            "http://localhost:3000",
+            frontendUrl,
+            "https://*.vercel.app"   // covers all Vercel preview deployments
+        ));
+
+        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
+        config.setAllowedHeaders(List.of(
+            "Authorization",
+            "Content-Type",
+            "X-User-Id",
+            "X-Requested-With",
+            "Accept",
+            "Origin"
+        ));
+        config.setExposedHeaders(List.of("Authorization"));
         config.setAllowCredentials(true);
+        config.setMaxAge(3600L); // cache preflight for 1 hour — reduces OPTIONS requests
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);

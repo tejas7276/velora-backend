@@ -19,7 +19,7 @@ public class JwtUtil {
     @Value("${jwt.secret}")
     private String secret;
 
-    @Value("${jwt.expiration}")
+    @Value("${jwt.expiration:86400000}")
     private long expiration;
 
     private Key getSigningKey() {
@@ -57,7 +57,21 @@ public class JwtUtil {
     }
 
     /**
-     * Returns false on any parsing / signature / expiry error — never throws.
+     * Single-param validate — used by JwtAuthenticationFilter.
+     * Only checks signature and expiry — no email comparison needed
+     * because the filter just needs to know if the token is valid.
+     */
+    public boolean validateToken(String token) {
+        try {
+            extractClaims(token); // throws if invalid signature or expired
+            return !isTokenExpired(token);
+        } catch (JwtException | IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Two-param validate — used by AuthService when email is available.
      */
     public boolean validateToken(String token, String email) {
         try {
@@ -65,5 +79,12 @@ public class JwtUtil {
         } catch (JwtException | IllegalArgumentException e) {
             return false;
         }
+    }
+
+    /**
+     * Alias for extractUserId — used by JwtAuthenticationFilter.
+     */
+    public Long getUserIdFromToken(String token) {
+        return extractUserId(token);
     }
 }
