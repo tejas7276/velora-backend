@@ -28,7 +28,6 @@ public class SecurityConfig {
     @Value("${app.frontend.url:http://localhost:5173}")
     private String frontendUrl;
 
-    // Public endpoints — JWT filter must skip these entirely
     private static final String[] PUBLIC_ENDPOINTS = {
         "/auth/register",
         "/auth/login",
@@ -62,16 +61,15 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // Explicit origins — required when allowCredentials=true
-        // allowedOriginPatterns("*") with credentials=true is the safest approach
-        config.setAllowedOriginPatterns(List.of(
-            "http://localhost:5173",
-            "http://localhost:3000",
-            frontendUrl,
-            "https://*.vercel.app"   // covers all Vercel preview deployments
+        // allowedOriginPatterns("*") with allowCredentials=true is the correct approach.
+        // setAllowedOrigins("*") does NOT work with credentials — Spring will throw an error.
+        // allowedOriginPatterns("*") covers every origin including Vercel, Render, localhost.
+        config.setAllowedOriginPatterns(List.of("*"));
+
+        config.setAllowedMethods(List.of(
+            "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"
         ));
 
-        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         config.setAllowedHeaders(List.of(
             "Authorization",
             "Content-Type",
@@ -80,9 +78,10 @@ public class SecurityConfig {
             "Accept",
             "Origin"
         ));
+
         config.setExposedHeaders(List.of("Authorization"));
         config.setAllowCredentials(true);
-        config.setMaxAge(3600L); // cache preflight for 1 hour — reduces OPTIONS requests
+        config.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
