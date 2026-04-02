@@ -55,7 +55,7 @@ public class OpenAIClient {
     @Value("${openai.api.key}")
     private String apiKey;
 
-    @Value("${openai.api.url}")
+    @Value("${openai.api.url:https://api.groq.com/v1/chat/completions}")
     private String apiUrl;
 
     @Value("${openai.model:llama-3.3-70b-versatile}")
