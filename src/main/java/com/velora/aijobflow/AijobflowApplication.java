@@ -3,7 +3,8 @@ package com.velora.aijobflow;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
-@SpringBootApplication
+@SpringBootApplication (scanBasePackages = "com.velora.aijobflow")
+
 public class AijobflowApplication {
 
     public static void main(String[] args) {
