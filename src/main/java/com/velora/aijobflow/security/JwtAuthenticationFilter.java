@@ -28,21 +28,32 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     // server.servlet.context-path=/api means Spring strips /api before the filter sees the request.
     // So the incoming URL /api/auth/register becomes /auth/register inside the filter.
     // Using /api/auth/** here would NEVER match — causing 403 on every public endpoint.
-    private static final List<AntPathRequestMatcher> PUBLIC_PATHS = List.of(
-        new AntPathRequestMatcher("/auth/**"),
-        new AntPathRequestMatcher("/v3/api-docs/**"),
-        new AntPathRequestMatcher("/swagger-ui/**"),
-        new AntPathRequestMatcher("/swagger-ui.html"),
-        new AntPathRequestMatcher("/actuator/**")
-    );
+    // private static final List<AntPathRequestMatcher> PUBLIC_PATHS = List.of(
+    //     new AntPathRequestMatcher("/auth/**"),
+    //     new AntPathRequestMatcher("/v3/api-docs/**"),
+    //     new AntPathRequestMatcher("/swagger-ui/**"),
+    //     new AntPathRequestMatcher("/swagger-ui.html"),
+    //     new AntPathRequestMatcher("/actuator/**")
+    // );
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = request.getRequestURI();
-        log.debug("JWT filter checking path: {}", path);
-        return PUBLIC_PATHS.stream()
-            .anyMatch(matcher -> matcher.matches(request));
+    String path = request.getServletPath(); // IMPORTANT: NOT getRequestURI()
+
+    // Hard skip for all auth endpoints
+    if (path.startsWith("/auth")) {
+        return true;
     }
+
+    // Optional: skip swagger & actuator
+    if (path.startsWith("/v3/api-docs") ||
+        path.startsWith("/swagger") ||
+        path.startsWith("/actuator")) {
+        return true;
+    }
+
+    return false;
+}
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
