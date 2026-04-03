@@ -21,11 +21,15 @@ import java.util.List;
 @RequiredArgsConstructor
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
+    // FIX: lowercase field name — uppercase "JwtUtil" broke @RequiredArgsConstructor
     private final JwtUtil jwtUtil;
 
-    // These paths skip JWT validation entirely — no token needed
+    // FIX: paths must NOT include /api prefix.
+    // server.servlet.context-path=/api means Spring strips /api before the filter sees the request.
+    // So the incoming URL /api/auth/register becomes /auth/register inside the filter.
+    // Using /api/auth/** here would NEVER match — causing 403 on every public endpoint.
     private static final List<AntPathRequestMatcher> PUBLIC_PATHS = List.of(
-        new AntPathRequestMatcher("/auth/**"),  
+        new AntPathRequestMatcher("/auth/**"),
         new AntPathRequestMatcher("/v3/api-docs/**"),
         new AntPathRequestMatcher("/swagger-ui/**"),
         new AntPathRequestMatcher("/swagger-ui.html"),
@@ -34,8 +38,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-         String path = request.getServletPath();
-         return path.startsWith("/auth");
+        String path = request.getRequestURI();
+        log.debug("JWT filter checking path: {}", path);
+        return PUBLIC_PATHS.stream()
+            .anyMatch(matcher -> matcher.matches(request));
     }
 
     @Override
@@ -43,25 +49,19 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain)
             throws ServletException, IOException {
-
         try {
             String token = extractToken(request);
-
             if (StringUtils.hasText(token) && jwtUtil.validateToken(token)) {
                 Long userId = jwtUtil.getUserIdFromToken(token);
-
                 UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(userId, null, List.of());
-
                 SecurityContextHolder.getContext().setAuthentication(authentication);
                 log.debug("JWT valid — userId={} path={}", userId, request.getRequestURI());
             }
-
         } catch (Exception e) {
             SecurityContextHolder.clearContext();
-            log.warn("JWT validation failed for path={} : {}", request.getRequestURI(), e.getMessage());
+            log.warn("JWT validation failed: path={} error={}", request.getRequestURI(), e.getMessage());
         }
-
         filterChain.doFilter(request, response);
     }
 
