@@ -16,21 +16,6 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 import java.util.List;
 
-/**
- * JWT Authentication Filter
- *
- * Runs once per request. Extracts and validates the JWT token from
- * the Authorization header, then sets the authentication in the
- * SecurityContext so Spring Security knows who is making the request.
- *
- * KEY FIX: shouldNotFilter() skips this filter entirely for public
- * endpoints (/auth/**). Without this, the filter runs on /auth/register,
- * finds no token, and Spring Security returns 403 — even though
- * SecurityConfig has .permitAll() for that path.
- *
- * Why? .permitAll() controls ACCESS, not whether filters run.
- * Filters always run unless explicitly skipped here.
- */
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -40,18 +25,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     // These paths skip JWT validation entirely — no token needed
     private static final List<AntPathRequestMatcher> PUBLIC_PATHS = List.of(
-        new AntPathRequestMatcher("/api/auth/**"),
+        new AntPathRequestMatcher("/auth/**"),  
         new AntPathRequestMatcher("/v3/api-docs/**"),
         new AntPathRequestMatcher("/swagger-ui/**"),
         new AntPathRequestMatcher("/swagger-ui.html"),
         new AntPathRequestMatcher("/actuator/**")
     );
 
-    /**
-     * Skip this filter for public endpoints.
-     * This is the critical fix — without this, /auth/register gets a 403
-     * because the filter runs, finds no Bearer token, and rejects the request.
-     */
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         return PUBLIC_PATHS.stream()
@@ -70,8 +50,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             if (StringUtils.hasText(token) && jwtUtil.validateToken(token)) {
                 Long userId = jwtUtil.getUserIdFromToken(token);
 
-                // Set authentication in SecurityContext
-                // Principal = userId (Long) — SecurityUtils reads this
                 UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(userId, null, List.of());
 
@@ -80,7 +58,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             }
 
         } catch (Exception e) {
-            // Invalid token — clear context, let Spring Security handle it
             SecurityContextHolder.clearContext();
             log.warn("JWT validation failed for path={} : {}", request.getRequestURI(), e.getMessage());
         }
@@ -88,10 +65,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         filterChain.doFilter(request, response);
     }
 
-    /**
-     * Extracts Bearer token from Authorization header.
-     * Returns null if header is missing or not a Bearer token.
-     */
     private String extractToken(HttpServletRequest request) {
         String header = request.getHeader("Authorization");
         if (StringUtils.hasText(header) && header.startsWith("Bearer ")) {
