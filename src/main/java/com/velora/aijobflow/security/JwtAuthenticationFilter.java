@@ -36,7 +36,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
-    private final JwtUtil JwtUtil;
+    private final JwtUtil jwtUtil;
 
     // These paths skip JWT validation entirely — no token needed
     private static final List<AntPathRequestMatcher> PUBLIC_PATHS = List.of(
@@ -67,8 +67,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         try {
             String token = extractToken(request);
 
-            if (StringUtils.hasText(token) && JwtUtil.validateToken(token)) {
-                Long userId = JwtUtil.getUserIdFromToken(token);
+            if (StringUtils.hasText(token) && jwtUtil.validateToken(token)) {
+                Long userId = jwtUtil.getUserIdFromToken(token);
 
                 // Set authentication in SecurityContext
                 // Principal = userId (Long) — SecurityUtils reads this
