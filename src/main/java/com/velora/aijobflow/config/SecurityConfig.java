@@ -29,12 +29,12 @@ public class SecurityConfig {
     private String frontendUrl;
 
     private static final String[] PUBLIC_ENDPOINTS = {
-        "api/auth/register",
-        "api/auth/login",
-        "api/auth/forgot-password",
-        "api/auth/reset-password",
-        "api/auth/verify-otp",
-        "api/auth/refresh-token",
+        "/auth/register",
+        "/auth/login",
+        "/auth/forgot-password",
+        "/auth/reset-password",
+        "/auth/verify-otp",
+        "/auth/refresh-token",
         "/v3/api-docs/**",
         "/swagger-ui/**",
         "/swagger-ui.html",
