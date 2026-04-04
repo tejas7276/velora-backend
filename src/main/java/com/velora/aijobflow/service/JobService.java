@@ -4,6 +4,7 @@ import com.velora.aijobflow.model.Job;
 import com.velora.aijobflow.repository.JobRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -12,20 +13,6 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.List;
 
-/**
- * FIX 1: Added missing methods called by JobController:
- *         - getJobsByStatusForUser(userId, status)
- *         - getJobByIdForUser(jobId, userId)
- *         - retryJob(jobId, userId)
- *         - cancelJob(jobId, userId)
- *         Without these, the controller would throw NoSuchMethodError at runtime.
- *
- * FIX 2: updateJobStatus() had @Transactional(readOnly = true) but modifies data.
- *         Removed readOnly — was causing TransactionSystemException at runtime.
- *
- * FIX 3: Extracted findOrThrow() helper to avoid repeating
- *         the same findById + orElseThrow pattern 7 times.
- */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -64,8 +51,7 @@ public class JobService {
                 documentText != null && !documentText.isBlank());
 
         if (scheduledAt == null) {
-            rabbitTemplate.convertAndSend(exchange, routingKey, saved);
-            log.info("Job {} dispatched to queue", saved.getId());
+            dispatchToQueue(saved);
         }
         return saved;
     }
@@ -104,16 +90,11 @@ public class JobService {
 
     // ── RETRY ─────────────────────────────────────────────────────────────────
 
-    /** Called by scheduler / legacy internal code. */
     @Transactional
     public Job retryJob(Long jobId) {
         return retryJob(jobId, null);
     }
 
-    /**
-     * FIX 1: JobController calls retryJob(jobId, userId) — this overload was missing.
-     * Added userId ownership check before allowing retry.
-     */
     @Transactional
     public Job retryJob(Long jobId, Long userId) {
         Job job = findOrThrow(jobId);
@@ -131,22 +112,18 @@ public class JobService {
         job.setRetryCount(retries + 1);
         job.setErrorMessage(null);
         jobRepository.save(job);
-        rabbitTemplate.convertAndSend(exchange, routingKey, job);
+        dispatchToQueue(job);
         log.info("Job {} re-queued (retry #{})", jobId, job.getRetryCount());
         return job;
     }
 
     // ── CANCEL ────────────────────────────────────────────────────────────────
 
-    /** Called by scheduler / legacy internal code. */
     @Transactional
     public Job cancelJob(Long jobId) {
         return cancelJob(jobId, null);
     }
 
-    /**
-     * FIX 1: JobController calls cancelJob(jobId, userId) — this overload was missing.
-     */
     @Transactional
     public Job cancelJob(Long jobId, Long userId) {
         Job job = findOrThrow(jobId);
@@ -174,10 +151,6 @@ public class JobService {
         return jobRepository.findByUserIdAndStatusOrderByCreatedAtDesc(userId, status);
     }
 
-    /**
-     * FIX 1: JobController calls getJobsByStatusForUser() — this method was missing.
-     * Returns all user jobs, or filtered by status if provided.
-     */
     @Transactional(readOnly = true)
     public List<Job> getJobsByStatusForUser(Long userId, String status) {
         if (status != null && !status.isBlank()) {
@@ -196,10 +169,6 @@ public class JobService {
         return findOrThrow(jobId);
     }
 
-    /**
-     * FIX 1: JobController calls getJobByIdForUser(jobId, userId) — was missing.
-     * Adds ownership validation before returning.
-     */
     @Transactional(readOnly = true)
     public Job getJobByIdForUser(Long jobId, Long userId) {
         Job job = findOrThrow(jobId);
@@ -209,10 +178,6 @@ public class JobService {
         return job;
     }
 
-    /**
-     * FIX 2: Was annotated @Transactional(readOnly = true) but writes to DB.
-     * Removed readOnly to prevent TransactionSystemException.
-     */
     @Transactional
     public void updateJobStatus(Long jobId, String status) {
         Job job = findOrThrow(jobId);
@@ -226,15 +191,50 @@ public class JobService {
     public void releaseScheduledJob(Job job) {
         job.setStatus("PENDING");
         jobRepository.save(job);
-        rabbitTemplate.convertAndSend(exchange, routingKey, job);
+        dispatchToQueue(job);
         log.info("Scheduled job {} released to queue", job.getId());
+    }
+
+    // ── QUEUE DISPATCH ────────────────────────────────────────────────────────
+
+    /**
+     * ROOT CAUSE FIX — Issue 2:
+     *
+     * rabbitTemplate.convertAndSend() throws AmqpIOException /
+     * ShutdownSignalException / EOFException when RabbitMQ is unavailable.
+     *
+     * Previously this was called directly inside @Transactional createJob(),
+     * which meant a RabbitMQ failure caused the entire API call to return 500.
+     * The job WAS saved to DB (save() happened first) but the API reported failure.
+     *
+     * Fix: Isolate all RabbitMQ calls in this method with try-catch.
+     * - Job is ALWAYS saved to DB first (that never fails due to RabbitMQ).
+     * - If RabbitMQ is down: log a warning, leave job in PENDING status.
+     * - The scheduler (SchedulerConfig) can pick up PENDING jobs and retry.
+     * - The API always returns 201 Created with the saved job.
+     * - No 500 errors from RabbitMQ failures.
+     *
+     * AmqpException is the base class for all Spring AMQP exceptions including:
+     *   AmqpIOException, AmqpConnectException, AmqpTimeoutException.
+     * We also catch RuntimeException to cover ShutdownSignalException which
+     * is a com.rabbitmq.client exception (not AmqpException subclass).
+     */
+    private void dispatchToQueue(Job job) {
+        try {
+            rabbitTemplate.convertAndSend(exchange, routingKey, job);
+            log.info("Job {} dispatched to queue", job.getId());
+        } catch (RuntimeException ex) {
+            // RabbitMQ is down or connection refused.
+            // Job stays in DB with PENDING status — scheduler will retry.
+            // API call succeeds — client is NOT notified of queue failure.
+            log.warn("Job {} could not be queued (RabbitMQ unavailable): {}. " +
+                     "Job saved as PENDING — will retry via scheduler.",
+                     job.getId(), ex.getMessage());
+        }
     }
 
     // ── INTERNAL ──────────────────────────────────────────────────────────────
 
-    /**
-     * FIX 3: Centralized findById + orElseThrow to eliminate 7 identical copies.
-     */
     private Job findOrThrow(Long jobId) {
         return jobRepository.findById(jobId)
                 .orElseThrow(() -> new RuntimeException("Job not found: " + jobId));
