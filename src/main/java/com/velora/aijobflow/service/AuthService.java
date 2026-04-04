@@ -70,7 +70,7 @@ public class AuthService {
 
         log.info("New user registered: id={} email={}", saved.getId(), saved.getEmail());
 
-        emailService.ifPresent(s -> s.sendWelcome(saved.getEmail(), saved.getName()));
+        // emailService.ifPresent(s -> s.sendWelcome(saved.getEmail(), saved.getName()));
 
         String token = jwtUtil.generateToken(saved.getId(), saved.getEmail());
         return new AuthResponse(token, saved.getId(), saved.getName(), saved.getEmail());
