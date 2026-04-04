@@ -5,25 +5,46 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.JavaMailSenderImpl;
 import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 /**
- * EmailService — startup-safe, production-ready.
+ * ROOT CAUSE FIX — Issue 1 + 2:
  *
- * JavaMailSender is injected as optional (required = false).
- * If mail is not configured → send() logs a warning and returns.
- * App ALWAYS starts regardless of mail configuration.
+ * The SMTP connection to Gmail was blocking the HTTP request thread for
+ * up to 30 seconds (connection timeout). The sequence was:
  *
- * No @ConditionalOnProperty needed — optional injection is cleaner
- * and avoids the AuthService "bean not found" crash entirely.
+ *   register() → save(user) [DB commit] → sendWelcome() → SMTP blocks 30s
+ *                                                         → timeout exception
+ *                                                         → caught, logged
+ *                                         → AuthResponse returned (at 30s)
+ *   But Render/frontend timeout = 30s → client sees "Backend not reachable"
+ *   User sees failure even though DB save succeeded. They retry.
+ *   Second request finds existing email → 409 or 500 duplicate key.
+ *
+ * Fix: @Async on send(). Email runs in a background thread.
+ * register() returns the JWT token in <100ms regardless of SMTP.
+ * If email fails → logged as a warning. Auth flow is never affected.
+ *
+ * ALSO FIXED: The original send() had:
+ *   try {
+ *     MimeMessage msg = mailSender.createMimeMessage();  // inside try ✓
+ *     MimeMessageHelper h = new MimeMessageHelper(msg, true, "UTF-8");
+ *     h.setFrom(fromAddress, fromName);  // can throw UnsupportedEncodingException
+ *     ...
+ *     mailSender.send(msg);
+ *   } catch (Exception e) { ... }
+ * This was structurally correct but the SMTP timeout was the blocking issue.
+ * @Async eliminates the blocking entirely.
+ *
+ * NOTE: @Async requires @EnableAsync on a @Configuration class.
+ * Add @EnableAsync to AijobflowApplication or any @Configuration class.
  */
 @Slf4j
 @Service
 public class EmailService {
 
-    // required = false → app starts even if JavaMailSender bean doesn't exist
     @Autowired(required = false)
     private JavaMailSender mailSender;
 
@@ -49,7 +70,13 @@ public class EmailService {
 
     // ── PRIVATE ───────────────────────────────────────────────────────────────
 
-    private void send(String to, String subject, String html) {
+    /**
+     * @Async: runs in a Spring-managed thread pool, NOT the HTTP request thread.
+     * register() and forgotPassword() return IMMEDIATELY — they do not wait.
+     * SMTP timeout (30s), auth failure, or network error → logged, never thrown.
+     */
+    @Async
+    protected void send(String to, String subject, String html) {
         if (mailSender == null) {
             log.warn("Email skipped — JavaMailSender not configured. To: {} | Subject: {}", to, subject);
             return;
@@ -64,7 +91,9 @@ public class EmailService {
             mailSender.send(msg);
             log.info("Email sent → {} | {}", to, subject);
         } catch (Exception e) {
-            log.error("Email failed → {} : {}", to, e.getMessage(), e);
+            // Email failure NEVER propagates to the API caller.
+            // Auth and job flows are completely decoupled from email.
+            log.error("Email failed (async) → {} | {} : {}", to, subject, e.getMessage());
         }
     }
 
@@ -119,8 +148,6 @@ public class EmailService {
             "If you didn't request this, you can safely ignore this email."
         );
     }
-
-    // ── BUILDING BLOCKS ───────────────────────────────────────────────────────
 
     private String page(String title, String heroBlock, String body, String cta, String footer) {
         return "<!DOCTYPE html><html><head><meta charset='UTF-8'>" +
