@@ -15,6 +15,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
 import java.util.List;
 
 @Configuration
@@ -32,12 +33,24 @@ public class SecurityConfig {
             .csrf(csrf -> csrf.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
+                // CORS preflight — must be first
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+
+                // Auth endpoints — permit BOTH with and without /api prefix.
+                // ROOT CAUSE FIX: Render log shows context path = '' (empty string),
+                // meaning context-path=/api is NOT being applied by Tomcat.
+                // So the full path /api/auth/register arrives as /api/auth/register
+                // inside Spring, NOT as /auth/register.
+                // We permit both so the app works regardless of context-path state.
                 .requestMatchers("/auth/**").permitAll()
+                .requestMatchers("/api/auth/**").permitAll()
+
+                // API docs and health
                 .requestMatchers("/v3/api-docs/**").permitAll()
                 .requestMatchers("/swagger-ui/**").permitAll()
                 .requestMatchers("/swagger-ui.html").permitAll()
                 .requestMatchers("/actuator/**").permitAll()
+
                 .anyRequest().authenticated()
             )
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);

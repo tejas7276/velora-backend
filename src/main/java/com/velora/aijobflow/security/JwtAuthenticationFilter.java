@@ -8,7 +8,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -21,39 +20,52 @@ import java.util.List;
 @RequiredArgsConstructor
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
-    // FIX: lowercase field name — uppercase "JwtUtil" broke @RequiredArgsConstructor
     private final JwtUtil jwtUtil;
 
-    // FIX: paths must NOT include /api prefix.
-    // server.servlet.context-path=/api means Spring strips /api before the filter sees the request.
-    // So the incoming URL /api/auth/register becomes /auth/register inside the filter.
-    // Using /api/auth/** here would NEVER match — causing 403 on every public endpoint.
-    // private static final List<AntPathRequestMatcher> PUBLIC_PATHS = List.of(
-    //     new AntPathRequestMatcher("/auth/**"),
-    //     new AntPathRequestMatcher("/v3/api-docs/**"),
-    //     new AntPathRequestMatcher("/swagger-ui/**"),
-    //     new AntPathRequestMatcher("/swagger-ui.html"),
-    //     new AntPathRequestMatcher("/actuator/**")
-    // );
-
+    /**
+     * ROOT CAUSE FIX:
+     *
+     * Render logs show: "Tomcat started on port 8080 with context path ''"
+     * This means server.servlet.context-path=/api from application.properties
+     * is NOT being applied — Tomcat sees an empty context path.
+     *
+     * Effect: A request to POST /api/auth/register arrives at the filter
+     * as /api/auth/register — NOT as /auth/register.
+     *
+     * The original shouldNotFilter() only checked path.startsWith("/auth"),
+     * which would NOT match /api/auth/register — so the JWT filter ran,
+     * found no Bearer token, and the request was blocked → 403.
+     *
+     * Fix: Skip the filter for BOTH /auth/** and /api/auth/** paths.
+     * This makes the filter safe regardless of whether context-path is
+     * applied by Tomcat or not.
+     */
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-    String path = request.getServletPath(); // IMPORTANT: NOT getRequestURI()
+        String path   = request.getServletPath();
+        String method = request.getMethod();
 
-    // Hard skip for all auth endpoints
-    if (path.startsWith("/auth")) {
-        return true;
+        // Always skip OPTIONS (CORS preflight)
+        if ("OPTIONS".equalsIgnoreCase(method)) {
+            return true;
+        }
+
+        // Skip auth endpoints — handle both context-path states:
+        // With context-path=/api applied:    path = /auth/register     → matches /auth
+        // With context-path='' (Render bug): path = /api/auth/register → matches /api/auth
+        if (path.startsWith("/auth") || path.startsWith("/api/auth")) {
+            return true;
+        }
+
+        // Skip API docs and health
+        if (path.startsWith("/v3/api-docs") ||
+            path.startsWith("/swagger")     ||
+            path.startsWith("/actuator")) {
+            return true;
+        }
+
+        return false;
     }
-
-    // Optional: skip swagger & actuator
-    if (path.startsWith("/v3/api-docs") ||
-        path.startsWith("/swagger") ||
-        path.startsWith("/actuator")) {
-        return true;
-    }
-
-    return false;
-}
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
