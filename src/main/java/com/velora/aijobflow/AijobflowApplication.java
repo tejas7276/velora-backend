@@ -6,12 +6,13 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * @EnableAsync: Required for @Async in EmailService to work.
- * Without this, @Async is silently ignored — email still runs
- * synchronously and blocks the HTTP request thread.
+ * @EnableAsync  — activates @Async in EmailService.
+ *                 Without this, @Async is silently ignored and email
+ *                 still blocks the HTTP thread (30s SMTP timeout).
  *
- * @EnableScheduling: Already implicitly enabled by SchedulerConfig,
- * but explicitly adding it here is cleaner.
+ * @EnableScheduling — activates @Scheduled in SchedulerConfig.
+ *                     (Already declared on SchedulerConfig itself,
+ *                     but explicit here is cleaner.)
  */
 @SpringBootApplication(scanBasePackages = "com.velora.aijobflow")
 @EnableAsync

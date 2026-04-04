@@ -34,14 +34,10 @@ public class AuthService {
 
     @Transactional
     public AuthResponse register(RegisterRequest request) {
-        // NORMALIZE email to lowercase before any check or save.
-        // Prevents "User@example.com" and "user@example.com" being treated
-        // as different emails — both hit the unique constraint.
+        // Normalize email — prevent "User@x.com" vs "user@x.com" creating separate accounts
         String email = request.getEmail().trim().toLowerCase();
 
-        // Optimistic check — fast path for obvious duplicates.
-        // This does NOT prevent the race condition (two concurrent requests
-        // can both pass this check). The DB unique constraint is the real guard.
+        // Fast-path check — avoids DB insert attempt for obvious duplicates
         if (userRepository.existsByEmail(email)) {
             throw new DuplicateEmailException("This email address is already registered.");
         }
@@ -55,22 +51,24 @@ public class AuthService {
         User saved;
         try {
             saved = userRepository.save(user);
-            // Flush immediately so DataIntegrityViolationException is thrown HERE
-            // (inside this try-catch) rather than later at transaction commit time
-            // where it would be caught by the generic Exception handler.
+            // flush() forces the INSERT NOW (inside this try-catch) instead of
+            // at transaction commit time. Without flush(), a duplicate email
+            // race condition would throw DataIntegrityViolationException AFTER
+            // this method returns — caught by the generic exception handler → 500.
+            // With flush() here, we catch it and throw DuplicateEmailException → 409.
             userRepository.flush();
         } catch (DataIntegrityViolationException ex) {
-            // RACE CONDITION FIX: Two concurrent registrations with the same email
-            // both passed the existsByEmail() check, then both attempted INSERT.
-            // The second one hits the DB unique constraint here.
-            // We catch it and convert to DuplicateEmailException → 409.
-            log.warn("Duplicate email on save (race condition): {}", email);
+            // Two concurrent registrations with the same email both passed the
+            // existsByEmail() check. The second INSERT hits the DB unique constraint.
+            log.warn("Duplicate email on save (concurrent request): {}", email);
             throw new DuplicateEmailException("This email address is already registered.");
         }
 
         log.info("New user registered: id={} email={}", saved.getId(), saved.getEmail());
 
-        // emailService.ifPresent(s -> s.sendWelcome(saved.getEmail(), saved.getName()));
+        // Email is @Async in EmailService — this returns immediately.
+        // Email failure NEVER reaches here. Register always succeeds after DB save.
+        emailService.ifPresent(s -> s.sendWelcome(saved.getEmail(), saved.getName()));
 
         String token = jwtUtil.generateToken(saved.getId(), saved.getEmail());
         return new AuthResponse(token, saved.getId(), saved.getName(), saved.getEmail());
@@ -78,7 +76,7 @@ public class AuthService {
 
     @Transactional(readOnly = true)
     public AuthResponse login(LoginRequest request) {
-        // Normalize email for login too — matches registered lowercase email
+        // Normalize to match how email was stored at register time
         String email = request.getEmail().trim().toLowerCase();
         User user = userRepository.findByEmail(email)
                 .orElseThrow(InvalidCredentialsException::new);
@@ -97,10 +95,8 @@ public class AuthService {
             String code   = String.valueOf(100000 + new Random().nextInt(900000));
             long   expiry = System.currentTimeMillis() + 15 * 60 * 1000L;
             otpStore.put(normalizedEmail, new long[]{Long.parseLong(code), expiry});
-
             emailService.ifPresent(s ->
                     s.sendForgotPassword(normalizedEmail, user.getName(), code));
-
             log.info("OTP sent to {} (expires in 15 min)", normalizedEmail);
         });
     }
@@ -109,17 +105,14 @@ public class AuthService {
     public void resetPassword(String email, String code, String newPassword) {
         String key    = email.trim().toLowerCase();
         long[] stored = otpStore.get(key);
-
-        if (stored == null) {
+        if (stored == null)
             throw new IllegalArgumentException("No reset request found for this email.");
-        }
         if (System.currentTimeMillis() > stored[1]) {
             otpStore.remove(key);
             throw new IllegalArgumentException("Code expired. Please request a new one.");
         }
-        if (Long.parseLong(code.trim()) != stored[0]) {
+        if (Long.parseLong(code.trim()) != stored[0])
             throw new IllegalArgumentException("Invalid code. Please check and try again.");
-        }
 
         User user = userRepository.findByEmail(key)
                 .orElseThrow(() -> new IllegalArgumentException("User not found."));

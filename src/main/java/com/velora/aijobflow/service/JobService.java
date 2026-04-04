@@ -51,12 +51,12 @@ public class JobService {
                 documentText != null && !documentText.isBlank());
 
         if (scheduledAt == null) {
+            // dispatchToQueue has try-catch — RabbitMQ failure NEVER crashes createJob
             dispatchToQueue(saved);
         }
         return saved;
     }
 
-    /** Backward-compatible overload — no document, no scheduling. */
     @Transactional
     public Job createJob(Long userId, String jobType, String payload, String filePath) {
         return createJob(userId, jobType, payload, filePath, null, null, null, "MEDIUM");
@@ -91,9 +91,7 @@ public class JobService {
     // ── RETRY ─────────────────────────────────────────────────────────────────
 
     @Transactional
-    public Job retryJob(Long jobId) {
-        return retryJob(jobId, null);
-    }
+    public Job retryJob(Long jobId) { return retryJob(jobId, null); }
 
     @Transactional
     public Job retryJob(Long jobId, Long userId) {
@@ -105,9 +103,7 @@ public class JobService {
             throw new IllegalStateException("Only FAILED or CANCELLED jobs can be retried");
         }
         int retries = job.getRetryCount() != null ? job.getRetryCount() : 0;
-        if (retries >= 3) {
-            throw new IllegalStateException("Maximum retry limit (3) reached");
-        }
+        if (retries >= 3) throw new IllegalStateException("Maximum retry limit (3) reached");
         job.setStatus("PENDING");
         job.setRetryCount(retries + 1);
         job.setErrorMessage(null);
@@ -120,9 +116,7 @@ public class JobService {
     // ── CANCEL ────────────────────────────────────────────────────────────────
 
     @Transactional
-    public Job cancelJob(Long jobId) {
-        return cancelJob(jobId, null);
-    }
+    public Job cancelJob(Long jobId) { return cancelJob(jobId, null); }
 
     @Transactional
     public Job cancelJob(Long jobId, Long userId) {
@@ -165,9 +159,7 @@ public class JobService {
     }
 
     @Transactional(readOnly = true)
-    public Job getJobById(Long jobId) {
-        return findOrThrow(jobId);
-    }
+    public Job getJobById(Long jobId) { return findOrThrow(jobId); }
 
     @Transactional(readOnly = true)
     public Job getJobByIdForUser(Long jobId, Long userId) {
@@ -198,37 +190,26 @@ public class JobService {
     // ── QUEUE DISPATCH ────────────────────────────────────────────────────────
 
     /**
-     * ROOT CAUSE FIX — Issue 2:
+     * Wraps RabbitMQ publish in try-catch.
      *
-     * rabbitTemplate.convertAndSend() throws AmqpIOException /
-     * ShutdownSignalException / EOFException when RabbitMQ is unavailable.
+     * Why this matters:
+     * - createJob() is @Transactional — it commits the DB row.
+     * - If convertAndSend() throws, it propagates and rolls back the transaction.
+     * - Job disappears from DB but client gets 500. User retries. Duplicate key.
      *
-     * Previously this was called directly inside @Transactional createJob(),
-     * which meant a RabbitMQ failure caused the entire API call to return 500.
-     * The job WAS saved to DB (save() happened first) but the API reported failure.
-     *
-     * Fix: Isolate all RabbitMQ calls in this method with try-catch.
-     * - Job is ALWAYS saved to DB first (that never fails due to RabbitMQ).
-     * - If RabbitMQ is down: log a warning, leave job in PENDING status.
-     * - The scheduler (SchedulerConfig) can pick up PENDING jobs and retry.
-     * - The API always returns 201 Created with the saved job.
-     * - No 500 errors from RabbitMQ failures.
-     *
-     * AmqpException is the base class for all Spring AMQP exceptions including:
-     *   AmqpIOException, AmqpConnectException, AmqpTimeoutException.
-     * We also catch RuntimeException to cover ShutdownSignalException which
-     * is a com.rabbitmq.client exception (not AmqpException subclass).
+     * With this wrapper:
+     * - Job is ALWAYS saved to DB first (DB commit happens before this call).
+     * - If RabbitMQ is down → job stays as PENDING in DB, warn logged.
+     * - SchedulerConfig picks up PENDING jobs every 60s and retries dispatch.
+     * - API always returns 201 Created with the job. No 500 from MQ issues.
      */
     private void dispatchToQueue(Job job) {
         try {
             rabbitTemplate.convertAndSend(exchange, routingKey, job);
             log.info("Job {} dispatched to queue", job.getId());
-        } catch (RuntimeException ex) {
-            // RabbitMQ is down or connection refused.
-            // Job stays in DB with PENDING status — scheduler will retry.
-            // API call succeeds — client is NOT notified of queue failure.
+        } catch (AmqpException ex) {
             log.warn("Job {} could not be queued (RabbitMQ unavailable): {}. " +
-                     "Job saved as PENDING — will retry via scheduler.",
+                     "Job saved as PENDING — scheduler will retry.",
                      job.getId(), ex.getMessage());
         }
     }

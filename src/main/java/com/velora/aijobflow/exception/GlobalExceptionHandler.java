@@ -32,32 +32,20 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * ROOT CAUSE FIX — Issue 1:
-     *
-     * AuthService.register() checks existsByEmail() then calls save().
-     * Under concurrent requests, two threads can both pass the existsByEmail()
-     * check (both see false), then both attempt INSERT — the second one hits
-     * the DB unique constraint on users.email and throws
-     * DataIntegrityViolationException, NOT DuplicateEmailException.
-     *
-     * Without this handler, DataIntegrityViolationException falls through
-     * to the generic Exception handler → 500 Internal Server Error.
-     *
-     * Fix: Map DataIntegrityViolationException → 409 Conflict with a
-     * meaningful message. The DB constraint name "users_email_key" confirms
-     * the cause — we detect it and return a clean user-facing message.
+     * Safety net: if the flush() in AuthService doesn't catch the duplicate in time,
+     * or any other DB constraint fires anywhere in the app, this maps it to 409
+     * instead of falling through to the 500 generic handler.
      */
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<Map<String, Object>> handleDataIntegrity(DataIntegrityViolationException ex) {
-        String message = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
-        if (message.contains("email") || message.contains("users_email_key")) {
-            log.warn("Duplicate email constraint violation caught at handler level");
+        String msg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
+        if (msg.contains("email") || msg.contains("users_email_key")) {
+            log.warn("Duplicate email DB constraint (safety net handler)");
             return error(HttpStatus.CONFLICT, "This email address is already registered.");
         }
-        // Other DB constraint violations (e.g. FK violations) → 400
         log.warn("Data integrity violation: {}", ex.getMostSpecificCause().getMessage());
-        return error(HttpStatus.BAD_REQUEST, "Data constraint violation: " +
-                ex.getMostSpecificCause().getMessage());
+        return error(HttpStatus.BAD_REQUEST,
+                "Data constraint violation: " + ex.getMostSpecificCause().getMessage());
     }
 
     @ExceptionHandler(InvalidCredentialsException.class)
