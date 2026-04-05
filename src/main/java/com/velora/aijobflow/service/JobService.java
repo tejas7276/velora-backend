@@ -187,22 +187,6 @@ public class JobService {
         log.info("Scheduled job {} released to queue", job.getId());
     }
 
-    // ── QUEUE DISPATCH ────────────────────────────────────────────────────────
-
-    /**
-     * Wraps RabbitMQ publish in try-catch.
-     *
-     * Why this matters:
-     * - createJob() is @Transactional — it commits the DB row.
-     * - If convertAndSend() throws, it propagates and rolls back the transaction.
-     * - Job disappears from DB but client gets 500. User retries. Duplicate key.
-     *
-     * With this wrapper:
-     * - Job is ALWAYS saved to DB first (DB commit happens before this call).
-     * - If RabbitMQ is down → job stays as PENDING in DB, warn logged.
-     * - SchedulerConfig picks up PENDING jobs every 60s and retries dispatch.
-     * - API always returns 201 Created with the job. No 500 from MQ issues.
-     */
     private void dispatchToQueue(Job job) {
         try {
             rabbitTemplate.convertAndSend(exchange, routingKey, job);
