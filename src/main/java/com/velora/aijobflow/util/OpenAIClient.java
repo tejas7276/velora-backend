@@ -55,7 +55,7 @@ public class OpenAIClient {
     @Value("${openai.api.key}")
     private String apiKey;
 
-    @Value("${openai.api.url:https://api.groq.com/openai/v1/chat/completions}")
+    @Value("${openai.api.url:https://api.groq.com/v1/chat/completions}")
     private String apiUrl;
 
     @Value("${openai.model:llama-3.3-70b-versatile}")
@@ -70,6 +70,35 @@ public class OpenAIClient {
     private static final double  T_FACTUAL  = 0.05;
     private static final double  T_ANALYSIS = 0.15;
     private static final double  T_CREATIVE = 0.40;
+
+
+    // ── INPUT VALIDATION GATE ─────────────────────────────────────────────────
+    // Doc 15 Rule 1: Before ANY reasoning, reject URL / empty / placeholder inputs.
+    // Returns null if input is valid, or a STATUS: FAILED message if not.
+    private static final java.util.regex.Pattern URL_PATTERN =
+        java.util.regex.Pattern.compile("^https?://\\S+$", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    private String validateInput(String input) {
+        if (input == null || input.isBlank()) {
+            return "STATUS: FAILED\nREASON: Input is empty. Please provide actual content for processing.";
+        }
+        String trimmed = input.trim();
+        if (URL_PATTERN.matcher(trimmed).matches()) {
+            return "STATUS: FAILED\nREASON: A URL was provided instead of content. This system cannot fetch URLs. " +
+                   "Please paste the actual text, resume, code, or document content directly.";
+        }
+        String lower = trimmed.toLowerCase();
+        if (lower.equals("[add your own]") || lower.equals("[placeholder]") ||
+            lower.equals("your text here") || lower.equals("paste content here")) {
+            return "STATUS: FAILED\nREASON: Placeholder text detected. Please replace with real content.";
+        }
+        int wc = trimmed.split("\\s+").length;
+        if (wc < 3) {
+            return "STATUS: FAILED\nREASON: Input too short for meaningful processing (" + wc + " words). " +
+                   "Please provide sufficient content.";
+        }
+        return null; // valid
+    }
 
     private static final String GROUND =
         "\n\nCRITICAL: Use ONLY information from the provided content. " +
@@ -96,60 +125,285 @@ public class OpenAIClient {
     }
 
     public String summarizeText(String text, String model) throws Exception {
+        String guard = validateInput(text);
+        if (guard != null) return guard;
+
         PromptRouter.DocType  docType = PromptRouter.detectDocType(text);
-        PromptRouter.TaskType task    = PromptRouter.TaskType.ANALYSIS;
-        String sys = PromptRouter.systemPromptFor(task, docType)
-                   + PromptRouter.groundingFor(task);
-        if (wordCount(text) < 150) {
-            return trimToSentences(invoke(sys, text, model, 150, 0.0), 3);
+        int wc = wordCount(text);
+
+        // SHORT INPUT: concise 3-sentence distillation, no padding
+        if (wc < 150) {
+            return invoke(
+                "You are a master distiller. Extract the single most important insight. " +
+                "Write 2–3 precise sentences. No openers, no conclusions, no padding.",
+                "Distill this to its core meaning:\n\n" + text,
+                model, 120, 0.0);
         }
-        String sections = switch (docType) {
-            case RESUME        -> "## Candidate Profile\n## Key Skills\n## Education\n## Career Highlights\n";
-            case CODE          -> "## Purpose\n## Architecture\n## Key Functions\n## Dependencies\n";
-            case DATA          -> "## Key Metrics\n## Trends\n## Anomalies\n## Missing Data\n";
-            case MEETING_NOTES -> "## Topics Discussed\n## Decisions\n## Action Items\n";
-            default            -> "## TL;DR\n## Key Points\n## Summary\n## Not Covered\n";
+
+        // FULL SUMMARY: doc-type-aware expert lens
+        String sys = PromptRouter.systemPromptFor(PromptRouter.TaskType.ANALYSIS, docType)
+                   + PromptRouter.groundingFor(PromptRouter.TaskType.ANALYSIS);
+
+        String lens = switch (docType) {
+            case RESUME ->
+                "You are a talent acquisition lead reviewing candidates for a competitive engineering role.\n" +
+                "EXTRACTION PRIORITY: name → current role → years of experience → strongest technical stack → education → red flags.\n\n" +
+                "## Candidate Snapshot\n" +
+                "One sentence: Name, role, years of experience, strongest technical area.\n\n" +
+                "## Technical Depth\n" +
+                "Languages + frameworks actually named. Mark each: Beginner / Intermediate / Advanced based on context clues (projects, duration, complexity).\n\n" +
+                "## Experience Quality\n" +
+                "Internship vs full-time. Company type. Real-world impact vs training. Duration consistency.\n\n" +
+                "## Education Signal\n" +
+                "Degree, institution, CGPA if present. Relevance to role.\n\n" +
+                "## Red Flags\n" +
+                "Gaps, vague descriptions, missing contact info, or overused buzzwords without evidence.\n\n" +
+                "## Recruiter Verdict\n" +
+                "Shortlist / Hold / Reject — one sentence of evidence.";
+
+            case CODE ->
+                "You are a principal engineer doing a production code review.\n" +
+                "ONLY comment on what you can actually see in the code.\n\n" +
+                "## Purpose\n" +
+                "What this code does in one sentence. Not what it's supposed to do.\n\n" +
+                "## Architecture Pattern\n" +
+                "Identify: MVC / Functional / Event-driven / Procedural / etc. Evidence from structure.\n\n" +
+                "## Key Functions\n" +
+                "Name each function/class. What it does. Input → Output.\n\n" +
+                "## Dependencies & Imports\n" +
+                "List only what appears in import/require statements.\n\n" +
+                "## Code Quality Signal\n" +
+                "Naming quality, error handling present/absent, complexity level. No generic advice.";
+
+            case DATA ->
+                "You are a senior data analyst presenting findings to a board.\n" +
+                "Every number you cite must exist in the input. Zero invented statistics.\n\n" +
+                "## Headline Metric\n" +
+                "The single most important number or finding from the data.\n\n" +
+                "## Key Metrics Extracted\n" +
+                "List each metric exactly as it appears. Format: Metric | Value | Context.\n\n" +
+                "## Trend Signal\n" +
+                "Direction of change if data shows it. Increasing / Decreasing / Flat. Evidence only.\n\n" +
+                "## Anomalies\n" +
+                "Any outlier, gap, or inconsistency visible in the data.\n\n" +
+                "## So What\n" +
+                "One sentence: what decision does this data support?";
+
+            case MEETING_NOTES ->
+                "You are an executive assistant who reads meeting notes and extracts only what is actionable.\n" +
+                "No summaries of discussion. Only decisions and actions.\n\n" +
+                "## Meeting in One Line\n" +
+                "Topic + Outcome. One sentence. No names unless essential.\n\n" +
+                "## Decisions Made\n" +
+                "Only explicitly stated decisions. Format: Decision | Rationale (if given).\n\n" +
+                "## Action Items\n" +
+                "Format: - Task → Owner (if named) | Due: [date if mentioned]\n" +
+                "If none: 'No action items recorded.'\n\n" +
+                "## Blockers / Dependencies\n" +
+                "Anything that was flagged as blocking progress.\n\n" +
+                "## Next Touchpoint\n" +
+                "When the team meets again or what triggers the next step.";
+
+            case LEGAL ->
+                "You are a senior legal counsel summarizing a contract for a C-suite executive.\n" +
+                "Cite section numbers or clause titles when present.\n\n" +
+                "## Document Type & Parties\n" +
+                "What kind of agreement. Who are the parties. Effective date if present.\n\n" +
+                "## Core Obligations\n" +
+                "What each party MUST do. Verbatim clause references where possible.\n\n" +
+                "## Rights Granted\n" +
+                "What each party is explicitly permitted to do.\n\n" +
+                "## Risk Clauses\n" +
+                "Liability caps, indemnification, termination triggers, penalty clauses.\n\n" +
+                "## Critical Dates\n" +
+                "Deadlines, expiry dates, notice periods from the document.\n\n" +
+                "## Red Flags\n" +
+                "Ambiguous language, one-sided clauses, or missing standard protections.";
+
+            case ARTICLE ->
+                "You are an editor at a research journal evaluating article quality and argument strength.\n\n" +
+                "## Central Argument\n" +
+                "The thesis in one sentence. Exactly what position the author defends.\n\n" +
+                "## Evidence Used\n" +
+                "What the author cites: studies, statistics, quotes, examples. Grade quality: Primary / Secondary / Anecdotal.\n\n" +
+                "## Logical Flow\n" +
+                "Does the argument progress coherently? Note any gaps or leaps.\n\n" +
+                "## Bias Indicators\n" +
+                "One-sided framing, cherry-picked data, missing counterarguments.\n\n" +
+                "## Conclusion Strength\n" +
+                "Does the evidence support the conclusion? Strong / Moderate / Overstated.";
+
+            default ->
+                "You are a senior analyst. Extract only what is explicitly stated.\n\n" +
+                "## TL;DR\n" +
+                "The single most important point in one sentence.\n\n" +
+                "## Key Points\n" +
+                "The 3–5 most important facts. Each tied to specific text.\n\n" +
+                "## What Is Not Covered\n" +
+                "Important gaps or missing context a reader would need.\n\n" +
+                "## Confidence\n" +
+                "How complete is the input? Complete / Partial / Insufficient.";
         };
-        return invoke(sys, "Summarize this document.\n\n" + sections + "\n---DOCUMENT---\n" + text,
-            model, 900, T_ANALYSIS);
+
+        // Dynamic token budget: scale with input size, cap at 1000
+        int tokens = Math.min(200 + (wc / 4), 1000);
+        return invoke(sys, lens + "\n\n---DOCUMENT---\n" + text, model, tokens, T_ANALYSIS);
     }
 
     public String analyzeText(String text, String model) throws Exception {
-        if (wordCount(text) < 50) return "INSUFFICIENT_DATA — document too short for analysis.";
+        String guard = validateInput(text);
+        if (guard != null) return guard;
+        if (wordCount(text) < 50) return "INSUFFICIENT_DATA — Minimum 50 words required for meaningful analysis.";
+
         PromptRouter.DocType  docType = PromptRouter.detectDocType(text);
-        PromptRouter.TaskType task    = PromptRouter.TaskType.ANALYSIS;
-        String sys = PromptRouter.systemPromptFor(task, docType)
-                   + PromptRouter.groundingFor(task);
-        String sections = switch (docType) {
-            case RESUME -> "## Candidate Overview\n## Technical Strengths\n## Experience Depth\n## Education Quality\n## Red Flags\n## Recommendation\n";
-            case CODE   -> "## Code Quality\n## Architecture\n## Security\n## Performance\n## Maintainability\n";
-            case DATA   -> "## Data Quality\n## Key Findings\n## Trends\n## Recommendations\n";
-            default     -> "## Executive Summary\n## Key Themes\n## Detailed Insights\n## Gaps\n";
+        String sys = PromptRouter.systemPromptFor(PromptRouter.TaskType.ANALYSIS, docType)
+                   + PromptRouter.groundingFor(PromptRouter.TaskType.ANALYSIS);
+
+        String prompt = switch (docType) {
+            case RESUME ->
+                "You are a Head of Talent at a top-tier tech company. You have seen 10,000 resumes.\n" +
+                "Your analysis must feel like feedback from someone who hires or rejects people for a living.\n" +
+                "RULE: Every claim references specific resume content. No generic observations.\n\n" +
+                "## Candidate Profile\n" +
+                "Name, role title, years of experience, location. One line only.\n\n" +
+                "## Technical Signal Strength\n" +
+                "For each technology mentioned, classify: WEAK (mentioned once) / MODERATE (used in project) / STRONG (shipped to production).\n" +
+                "Format: Technology | Signal | Evidence\n\n" +
+                "## Experience Quality Score\n" +
+                "Rate 1–5 on: Relevance, Depth, Impact, Progression. Show evidence for each.\n\n" +
+                "## Standout Factors\n" +
+                "What makes this resume memorable vs forgettable. Specific details only.\n\n" +
+                "## Hard Red Flags\n" +
+                "Employment gaps. Internship-only experience for senior role. Buzzword inflation. Missing technical evidence.\n\n" +
+                "## Hiring Decision\n" +
+                "Strong Yes / Yes / Borderline / No — with your single strongest reason.\n\n" +
+                "---RESUME---\n" + text;
+
+            case CODE ->
+                "You are a principal engineer doing a pre-merge security and architecture review.\n" +
+                "Flag real issues. Skip non-issues. Every point names the exact function or line.\n\n" +
+                "## Code Intent\n" +
+                "What this code does. One sentence. Based only on what you see.\n\n" +
+                "## Architecture Assessment\n" +
+                "Pattern used. Coupling level. Separation of concerns. Evidence from structure.\n\n" +
+                "## Security Audit\n" +
+                "SQL injection risk, unvalidated input, exposed secrets, authentication gaps. If none found: 'No visible security issues.'\n\n" +
+                "## Logic & Bug Analysis\n" +
+                "Off-by-one errors, null pointer risks, incorrect conditionals. Reference exact function names.\n\n" +
+                "## Performance Hotspots\n" +
+                "N+1 queries, unnecessary loops, blocking calls, missing indexes. If none: omit section.\n\n" +
+                "## Maintainability\n" +
+                "Naming quality, comment coverage, complexity per function. Be specific.\n\n" +
+                "## Priority Fix List\n" +
+                "Top 3 changes to make before production. Ordered by impact.\n\n" +
+                "---CODE---\n" + text;
+
+            case DATA ->
+                "You are a senior data scientist presenting to a board who needs to make a decision in 5 minutes.\n" +
+                "Every statistic you cite must exist verbatim in the data.\n\n" +
+                "## Data Health\n" +
+                "Completeness, consistency, obvious errors or anomalies.\n\n" +
+                "## Key Findings (Evidence-Locked)\n" +
+                "Top 5 findings. Format: Finding | Supporting data point | Implication.\n\n" +
+                "## Trend Analysis\n" +
+                "Direction of key metrics. Increasing / Decreasing / Volatile / Flat. Evidence.\n\n" +
+                "## Statistical Anomalies\n" +
+                "Outliers, gaps, unexpected values. Reference exact values.\n\n" +
+                "## Decision Support\n" +
+                "What action does this data justify? What action does it warn against?\n\n" +
+                "---DATA---\n" + text;
+
+            default ->
+                "You are a senior analyst. Extract verified insights only from the provided text.\n\n" +
+                "## Core Thesis\n" +
+                "What is this document fundamentally about? One sentence.\n\n" +
+                "## Verified Key Insights\n" +
+                "The 5 most important facts or claims. Each with a direct quote or reference.\n\n" +
+                "## Internal Contradictions\n" +
+                "Any claims that conflict with each other within the document.\n\n" +
+                "## Information Gaps\n" +
+                "What a reader would need to know that the document does not provide.\n\n" +
+                "## Confidence Assessment\n" +
+                "How well-supported are the main claims? Strong / Moderate / Speculative.\n\n" +
+                "---DOCUMENT---\n" + text;
         };
-        return invoke(sys, "Analyze this " + docType.name().toLowerCase() + ".\n\n" + sections +
-            "\n---DOCUMENT---\n" + text, model, 1000, T_ANALYSIS);
+
+        return invoke(sys, prompt, model, 1000, T_ANALYSIS);
     }
 
     public String analyzeSentiment(String text, String model) throws Exception {
+        String guard = validateInput(text);
+        if (guard != null) return guard;
+
         PromptRouter.DocType docType = PromptRouter.detectDocType(text);
+
         if (docType == PromptRouter.DocType.RESUME) {
             return invoke(
-                "You are an HR language specialist.",
-                "Analyze the professional tone of this resume.\n\n" +
-                "## Professional Tone\nConfident / Passive / Assertive / Vague\n\n" +
-                "## Language Quality\nClarity, action verbs, specificity.\n\n" +
-                "## First Impression\nFor a hiring manager.\n\n" +
-                "## Suggested Improvements\n\n---RESUME---\n" + text,
-                model, 600, T_ANALYSIS);
+                "You are a behavioral language analyst who specializes in how language signals competence, confidence, and credibility in professional documents.",
+                "Analyze the professional language quality of this resume.\n\n" +
+
+                "## Tone Classification\n" +
+                "Choose one: Commanding / Confident / Neutral / Passive / Apologetic\n" +
+                "Evidence: Quote 1–2 specific phrases that justify this classification.\n\n" +
+
+                "## Action Verb Quality\n" +
+                "Strong verbs (Led, Architected, Reduced, Shipped) vs weak verbs (Helped, Assisted, Worked on).\n" +
+                "List the 3 strongest and 3 weakest verb choices found in the resume.\n\n" +
+
+                "## Specificity Score (1–10)\n" +
+                "10 = every claim has a number, technology, or outcome attached.\n" +
+                "1 = entirely generic, no measurable claims.\n" +
+                "Score: X/10 — Evidence: [Example of specific claim] vs [Example of vague claim]\n\n" +
+
+                "## Credibility Signals\n" +
+                "What language choices build trust? Metrics, project names, technology versions, dates.\n\n" +
+
+                "## Credibility Weaknesses\n" +
+                "Overused buzzwords (passionate, detail-oriented, hardworking) with no supporting evidence.\n\n" +
+
+                "## Hiring Manager First Read\n" +
+                "One sentence: the gut-level impression this language creates.\n\n" +
+
+                "## Rewrite Targets\n" +
+                "Quote 2 specific weak sentences from the resume and show what strong version would look like.\n" +
+                "Format: BEFORE: '...' → AFTER: '...'\n\n" +
+                "---RESUME---\n" + text,
+                model, 700, T_ANALYSIS);
         }
+
         return invoke(
-            "Sentiment analysis expert. Base analysis strictly on words present.",
-            "Analyze sentiment.\n\n" +
-            "## Overall Sentiment\nPositive / Negative / Neutral / Mixed\n\n" +
-            "## Confidence\nX%\n\n## Score\n-10 to +10\n\n" +
-            "## Key Sentiment Drivers\nExact words from text.\n\n" +
-            "## Emotional Tone\nWith evidence.\n\n---TEXT---\n" + text,
-            model, 600, T_ANALYSIS);
+            "You are a computational linguist and behavioral analyst. " +
+            "Your sentiment analysis goes beyond positive/negative into emotional granularity. " +
+            "Base EVERY observation on exact words from the text.",
+
+            "Perform deep sentiment analysis.\n\n" +
+
+            "## Sentiment Verdict\n" +
+            "Overall: Positive / Negative / Neutral / Mixed | Intensity: Strong / Moderate / Mild\n\n" +
+
+            "## Polarity Score\n" +
+            "Scale: -10 (extreme negative) to +10 (extreme positive). Score: X/10\n" +
+            "Justification: 2 sentences maximum.\n\n" +
+
+            "## Emotion Profile\n" +
+            "Identify the dominant emotions present. Format:\n" +
+            "- [Emotion]: [Evidence — exact quote from text]\n" +
+            "Choose from: Joy, Trust, Anticipation, Fear, Anger, Disgust, Sadness, Surprise, Frustration, Satisfaction\n\n" +
+
+            "## Linguistic Evidence\n" +
+            "The 5 most sentiment-loaded words or phrases in the text.\n" +
+            "Format: '[phrase]' → [sentiment it carries] → [intensity: High/Med/Low]\n\n" +
+
+            "## Emotional Trajectory\n" +
+            "Does the sentiment change across the text? Beginning vs middle vs end.\n\n" +
+
+            "## Hidden Signals\n" +
+            "Passive-aggressive language, hedging, understatement, or irony if present.\n\n" +
+
+            "## Confidence in Analysis\n" +
+            "High / Medium / Low — based on text length and clarity of emotional signals.\n\n" +
+            "---TEXT---\n" + text,
+            model, 700, T_ANALYSIS);
     }
 
     public String extractKeywords(String text, String model) throws Exception {
@@ -186,11 +440,39 @@ public class OpenAIClient {
     }
 
     public String translateText(String text, String model) throws Exception {
+        String guard = validateInput(text);
+        if (guard != null) return guard;
+
         return invoke(
-            "Professional translator. Detect language. Preserve tone exactly.",
-            "Translate.\n\n## Detected Language\n## Translation\n\n" +
-            "## Translator Notes\nOmit if no idioms.\n\n---TEXT---\n" + text,
-            model, 700, T_FACTUAL);
+            "You are a senior human translator with 20+ years of cross-cultural localization experience. " +
+            "You translate for meaning, tone, and cultural appropriateness — not word-for-word. " +
+            "You preserve formality level, emotional register, and domain-specific terminology exactly.",
+
+            "Translate the following text with professional precision.\n\n" +
+
+            "## Source Language Detected\n" +
+            "[Language name + confidence: High/Medium/Low]\n\n" +
+
+            "## Target Language\n" +
+            "[Detected from context or default to English if source is non-English]\n\n" +
+
+            "## Translation\n" +
+            "[Full, natural translation — not word-for-word but meaning-accurate]\n\n" +
+
+            "## Tone Match\n" +
+            "Formal / Semi-formal / Casual / Technical — and whether this was preserved.\n\n" +
+
+            "## Cultural & Contextual Notes\n" +
+            "Only include if: idioms were adapted, cultural references required localization, " +
+            "or multiple valid translations exist. Format:\n" +
+            "- Original: '[phrase]' → Translated as: '[phrase]' — Note: [why]\n" +
+            "Omit this section entirely if no such cases exist.\n\n" +
+
+            "## Terminology Precision\n" +
+            "If domain-specific terms were present (legal, medical, technical), name them and explain translation choice.\n" +
+            "Omit if no specialized terms.\n\n" +
+            "---TEXT---\n" + text,
+            model, 800, T_FACTUAL);
     }
 
     public String generateReport(String data, String model) throws Exception {
@@ -304,21 +586,69 @@ public class OpenAIClient {
     }
 
     public String scoreResume(String resumeText, String model) throws Exception {
-        if (wordCount(resumeText) < 30) return "INSUFFICIENT_DATA — resume too short.";
-        String sys = PromptRouter.systemPromptFor(PromptRouter.TaskType.ANALYSIS, PromptRouter.DocType.RESUME)
-                   + PromptRouter.groundingFor(PromptRouter.TaskType.ANALYSIS);
+        String guard = validateInput(resumeText);
+        if (guard != null) return guard;
+        if (wordCount(resumeText) < 30) return "INSUFFICIENT_DATA — Resume too short for reliable scoring (minimum 30 words).";
+
+        String sys =
+            "You are a FAANG-level technical recruiter who has reviewed over 50,000 resumes. " +
+            "You score with surgical precision. You NEVER inflate scores. " +
+            "Every dimension must cite specific content from the resume. " +
+            "If content is missing, that dimension scores 0.\n\n" +
+            "SCORING PHILOSOPHY:\n" +
+            "- 90–100: Top 1% candidate — exceptional across all dimensions\n" +
+            "- 75–89: Strong candidate — clear strengths, minor gaps\n" +
+            "- 60–74: Average candidate — some strengths, notable gaps\n" +
+            "- 45–59: Below average — significant gaps or red flags\n" +
+            "- Below 45: Weak — critical information missing or unverifiable";
+
         return invoke(sys,
-            "Score resume using this rubric (100pts total):\n" +
-            "- Contact & Basics (10): name, email, phone, location\n" +
-            "- Work Experience (30): companies, roles, years, achievements\n" +
-            "- Skills (20): technical + soft skills\n" +
-            "- Education (15): degree, institution, year\n" +
-            "- ATS Friendliness (15): keywords, format\n" +
-            "- Summary/Objective (10): present and compelling\n\n" +
-            "## Overall Score: X/100\n## ATS Compatibility: X/100\n## First Impression\n" +
-            "## Top 3 Strengths\n## Top 3 Weaknesses\n## Missing ATS Keywords\n" +
-            "## Top 5 Fixes\n## Best-Fit Roles\n\n---RESUME---\n" + resumeText,
-            model, 1200, T_ANALYSIS);
+            "Score this resume with exact evidence for every score given.\n\n" +
+
+            "## Scorecard\n" +
+            "| Dimension | Max | Score | Evidence (from resume) |\n" +
+            "|---|---|---|---|\n" +
+            "| Contact & Identity | 10 | X | Name/email/phone/location present or absent |\n" +
+            "| Work Experience Quality | 30 | X | Companies, roles, duration, measurable impact |\n" +
+            "| Technical Skills Depth | 20 | X | Technologies named + context (project/duration) |\n" +
+            "| Education Relevance | 15 | X | Degree, institution, CGPA if present |\n" +
+            "| ATS & Format | 15 | X | Keywords, clean structure, no tables/graphics |\n" +
+            "| Summary / Objective | 10 | X | Present, specific, targeted or generic/absent |\n\n" +
+
+            "## Overall Score: X/100\n" +
+            "## ATS Compatibility: X/100\n\n" +
+
+            "## First Impression (recruiter gut reaction)\n" +
+            "One sentence. What does this resume make you think immediately?\n\n" +
+
+            "## Strongest Asset\n" +
+            "The single most compelling thing in this resume. Specific detail.\n\n" +
+
+            "## Critical Weaknesses (evidence-based)\n" +
+            "1. [Weakness] → [Exact evidence or absence of evidence]\n" +
+            "2. [Weakness] → [Exact evidence]\n" +
+            "3. [Weakness] → [Exact evidence]\n\n" +
+
+            "## ATS Keyword Gaps\n" +
+            "Skills/tools/certifications that are absent but expected for this profile level. ONLY list what is genuinely missing.\n\n" +
+
+            "## Priority Fixes (ordered by impact)\n" +
+            "1. [Highest impact fix] — Expected gain: +X points\n" +
+            "2. [Second fix] — Expected gain: +X points\n" +
+            "3. [Third fix] — Expected gain: +X points\n\n" +
+
+            "## Best-Fit Roles\n" +
+            "Based ONLY on proven experience: [Role 1], [Role 2], [Role 3]\n\n" +
+
+            "## Hiring Recommendation\n" +
+            "Strong Hire / Hire / Maybe / Pass — one line of supporting evidence.\n\n" +
+
+            "RULES:\n" +
+            "- If a section of the resume has NO content, score that dimension 0\n" +
+            "- DO NOT score higher than what the evidence supports\n" +
+            "- NEVER write 'the candidate has strong skills' without naming the skill\n\n" +
+            "---RESUME---\n" + resumeText,
+            model, 1400, T_ANALYSIS);
     }
 
     public String generateInterviewPrep(String jobDescription, String model) throws Exception {
@@ -528,87 +858,80 @@ public class OpenAIClient {
 }
 
     public String generateLinkedInBio(String resumeOrSummary, String model) throws Exception {
+        String guard = validateInput(resumeOrSummary);
+        if (guard != null) return guard;
 
-    String sys = PromptRouter.systemPromptFor(PromptRouter.TaskType.GENERATION, PromptRouter.DocType.RESUME)
-               + PromptRouter.groundingFor(PromptRouter.TaskType.GENERATION);
+        String sys =
+            "You are a LinkedIn personal branding specialist who has optimized profiles for engineers " +
+            "hired at Google, Amazon, Stripe, and Coinbase. " +
+            "Your profiles get responses from recruiters because they are specific, credible, and not templated. " +
+            "You have zero tolerance for: generic phrases, buzzwords without evidence, placeholders, or invented credentials.\n\n" +
+            "IRON RULES:\n" +
+            "- Every sentence you write maps to a specific fact in the provided input\n" +
+            "- If a skill, project, or company is not in the input → do NOT include it\n" +
+            "- If a section has no supporting data → write INSUFFICIENT DATA for that section only\n" +
+            "- NEVER write [ADD YOUR OWN] — this is a finished deliverable, not a template\n" +
+            "- NEVER use: results-driven, passionate, hardworking, motivated, detail-oriented, team player (without evidence)";
 
-    return invoke(sys,
-        "Act as a senior recruiter, ATS system, and LinkedIn personal branding expert.\n" +
-        "Create a HIGH-IMPACT LinkedIn profile that is realistic, keyword-optimized, and recruiter-ready.\n\n" +
+        return invoke(sys,
+            "BUILD A COMPLETE LINKEDIN PROFILE from the provided background data.\n\n" +
 
-        "STRICT RULES (NON-NEGOTIABLE):\n" +
-        "- Use ONLY provided data\n" +
-        "- DO NOT add any technology, tool, or concept not explicitly present\n" +
-        "- DO NOT invent experience, tools, or achievements\n" +
-        "- If something is missing → skip it\n" +
-        "- Avoid generic words (motivated, hardworking, passionate, detail-oriented)\n" +
-        "- Keep content concise, sharp, and natural\n\n" +
+            "PHASE 1 — FORCED EXTRACTION (do this internally before writing anything):\n" +
+            "Extract and rank: Role type | Experience level | Top 3 technologies (with signal strength) | " +
+            "Projects (name + what was built) | Companies (name + type + duration) | Unique differentiator\n\n" +
 
-        "STEP 1 — EXTRACTION:\n" +
-        "- Identify role (Backend / Full Stack / etc.)\n" +
-        "- Identify experience level (Fresher / Intern / etc.)\n" +
-        "- Extract technologies and tools\n" +
-        "- Detect strongest technical area\n\n" +
+            "PHASE 2 — POSITIONING DECISION:\n" +
+            "Based on extraction, choose the single strongest positioning angle. Example:\n" +
+            "- Not 'Developer' → 'Spring Boot Backend Developer who has shipped [specific project]'\n\n" +
 
-        "STEP 2 — EVALUATION:\n" +
-        "- Evaluate profile strength\n" +
-        "- Identify missing high-value skills ONLY if clearly relevant (cloud, testing, etc.)\n\n" +
+            "PHASE 3 — OUTPUT (strict format):\n\n" +
 
-        "STEP 3 — POSITIONING (CRITICAL):\n" +
-        "- Position candidate based on strongest skill\n" +
-        "- Example: 'Backend-Focused Full Stack Developer'\n\n" +
+            "## Profile Strength Score\n" +
+            "[X/100] — [One sentence explaining the score based on evidence quality]\n\n" +
 
-        "OUTPUT FORMAT:\n\n" +
+            "## Headline (under 220 chars)\n" +
+            "[Role] | [Top Technology] | [Specific differentiator from input — not generic]\n" +
+            "RULE: No buzzwords. Must contain at least one technology name from input.\n\n" +
 
-        "## Profile Strength Score (0–100)\n\n" +
+            "## About Section\n" +
+            "5–6 sentences. Each sentence must be grounded in one specific fact from the input.\n" +
+            "Sentence 1: Who they are + what they build (role + strongest tech)\n" +
+            "Sentence 2: Most significant project or experience (specific name + what was achieved)\n" +
+            "Sentence 3: Technical depth (technologies with context — not a list dump)\n" +
+            "Sentence 4: Experience quality (intern/full-time, company type, real-world vs learning)\n" +
+            "Sentence 5: Career direction (where they want to go — infer from current skills only)\n" +
+            "If any sentence cannot be grounded → skip it.\n\n" +
 
-        "## Headline (MAX 220 chars — CRITICAL)\n" +
-        "- Role + specialization + key technologies ONLY from input\n\n" +
+            "## Technical Skills (from input only)\n" +
+            "Backend: [only if present in input]\n" +
+            "Frontend: [only if present in input]\n" +
+            "Database: [only if present in input]\n" +
+            "Cloud/DevOps: [only if present in input]\n" +
+            "Testing: [only if present in input]\n" +
+            "If a category has no data from input: omit that row entirely.\n\n" +
 
-        "## About Section (5–6 lines)\n" +
-        "- Clear role identity\n" +
-        "- Technical strengths\n" +
-        "- Real experience (intern/projects only if present)\n" +
-        "- Career direction\n" +
-        "- No fluff, no storytelling\n\n" +
+            "## Featured Work\n" +
+            "For each project in the input:\n" +
+            "- [Project Name]: [What was built] + [Technology used] + [Impact if stated]\n" +
+            "If no projects in input: INSUFFICIENT DATA\n\n" +
 
-        "## Core Skills (Grouped)\n" +
-        "- Backend:\n" +
-        "- Frontend:\n" +
-        "- Database:\n" +
-        "- Tools:\n\n" +
+            "## Recruiter Hook (2 sentences)\n" +
+            "The sharpest possible description of this person for a technical recruiter.\n" +
+            "Must contain: specific technology + specific project or experience + experience level.\n\n" +
 
-        "## Featured Work (if available)\n" +
-        "- Project + actual contribution\n\n" +
+            "## Skill Gaps (honest assessment)\n" +
+            "Based on the profile level, what HIGH-VALUE skills are conspicuously absent.\n" +
+            "List only gaps that matter for their target role. Not a generic wish list.\n\n" +
 
-        "## Recruiter Hook\n" +
-        "- 1–2 lines, sharp and realistic\n\n" +
+            "## Connection Request Message\n" +
+            "150 characters max. Specific, personal, references something from their actual work.\n\n" +
 
-        "## Keyword Gaps (CRITICAL)\n" +
-        "- ONLY list missing skills if clearly not present\n\n" +
+            "## LinkedIn Bio (FINAL COPY)\n" +
+            "Combine Headline + About in clean paragraph format. Copy-paste ready. Zero placeholders.\n\n" +
 
-        "## Optimization Suggestions\n" +
-        "- Exact improvements based on input only\n\n" +
-
-        "## Connection Message\n" +
-        "- Short, professional, non-generic (2–3 lines)\n\n" +
-
-        "## Content Strategy (2–3 ideas)\n\n" +
-
-        "## LinkedIn Bio (FINAL COPY-READY)\n" +
-        "- Combine Headline + About into clean format\n\n" +
-
-        "QUALITY CONTROL (STRICT):\n" +
-        "- No hallucinated tools (e.g., AWS, MongoDB if not given)\n" +
-        "- No generic buzzwords\n" +
-        "- Must reflect ONLY real candidate data\n" +
-        "- Must be copy-paste ready\n\n" +
-
-        "---INPUT---\n" + resumeOrSummary,
-
-        model, 1000, T_CREATIVE
-    );
-}
+            "---INPUT---\n" + resumeOrSummary,
+            model, 1200, T_CREATIVE);
+    }
 
     public String writeEmail(String context, String model) throws Exception {
         String sys = PromptRouter.systemPromptFor(PromptRouter.TaskType.GENERATION, PromptRouter.DocType.EMAIL);
@@ -664,46 +987,93 @@ public class OpenAIClient {
     }
 
     public String summarizeMeeting(String notes, String model) throws Exception {
-        String sys = PromptRouter.systemPromptFor(PromptRouter.TaskType.ANALYSIS, PromptRouter.DocType.MEETING_NOTES)
-                   + PromptRouter.groundingFor(PromptRouter.TaskType.ANALYSIS);
-        return invoke(sys,
-            "Extract only the following from the meeting notes. Do NOT add summaries, decisions, or follow-up emails.\n\n" +
+        String guard = validateInput(notes);
+        if (guard != null) return guard;
+
+        return invoke(
+            "You are a Chief of Staff who reads meeting notes and produces extraction-only summaries " +
+            "for C-suite executives who have 2 minutes to read. " +
+            "You NEVER invent, assume, or infer. Every item you write was explicitly said in the notes. " +
+            "You are not a summarizer — you are an extractor. Structure is everything.",
+
+            "Extract ONLY the following from the meeting notes. " +
+            "Do NOT add context, interpretation, or anything not explicitly stated.\n\n" +
+
+            "## Meeting in One Line\n" +
+            "Topic + Core Outcome. One sentence. No names unless necessary.\n\n" +
+
+            "## Decisions Made\n" +
+            "Format: - [Decision] (mentioned by: [name if stated])\n" +
+            "If none explicitly stated: 'No decisions recorded in these notes.'\n\n" +
+
             "## Action Items\n" +
-            "List each task assigned. Format: - [Task] → Owner (if mentioned) | Due: [date if mentioned]\n" +
-            "If none assigned: write 'No action items recorded.'\n\n" +
-            "## Deadlines\n" +
-            "List each explicit deadline mentioned. Format: - [Deadline] → Context\n" +
-            "If none mentioned: write 'No deadlines mentioned.'\n\n" +
-            "## Next Steps\n" +
-            "List what happens after this meeting. Format: - [Next step]\n" +
-            "If none stated: write 'No next steps defined.'\n\n" +
-            "RULES:\n" +
-            "- Do NOT add a summary section.\n" +
-            "- Do NOT add decisions, open questions, or follow-up email.\n" +
-            "- Only include what is explicitly stated in the notes.\n\n" +
+            "Format: - [Task] → Owner: [name or 'unassigned'] | Due: [date or 'not stated']\n" +
+            "If none: 'No action items assigned.'\n\n" +
+
+            "## Deadlines Mentioned\n" +
+            "Format: - [Deadline] → What it applies to\n" +
+            "If none: 'No deadlines mentioned.'\n\n" +
+
+            "## Blockers / Risks Flagged\n" +
+            "Format: - [Issue] → Raised by: [name if stated]\n" +
+            "If none mentioned: 'None flagged.'\n\n" +
+
+            "## Next Touchpoint\n" +
+            "When the team meets again or what triggers next action. " +
+            "If not stated: 'Not defined in these notes.'\n\n" +
+
+            "HARD RULES:\n" +
+            "- Quote or paraphrase only what is in the notes\n" +
+            "- If a field has no data, write the exact fallback phrase shown above\n" +
+            "- Do NOT add follow-up email suggestions, summaries of discussion, or your own interpretations\n\n" +
             "---MEETING NOTES---\n" + notes,
-            model, 600, T_ANALYSIS);
+            model, 700, T_ANALYSIS);
     }
 
     public String explainBug(String bugReport, String model) throws Exception {
-        String sys = PromptRouter.systemPromptFor(PromptRouter.TaskType.ANALYSIS, PromptRouter.DocType.CODE)
-                   + PromptRouter.groundingFor(PromptRouter.TaskType.ANALYSIS);
-        return invoke(sys,
-            "Diagnose the following bug and provide a direct fix.\n\n" +
-            "RULES:\n" +
-            "- Reference the exact line number or function name where the bug occurs.\n" +
-            "- Keep all explanations short and specific to this bug.\n" +
-            "- Do NOT add prevention tips or why-it-works explanations.\n\n" +
-            "## Severity\n" +
-            "Critical / High / Medium / Low — one line justification.\n\n" +
-            "## What Went Wrong\n" +
-            "Plain English. One or two sentences. What failed and where (exact line/function).\n\n" +
-            "## Root Cause\n" +
-            "Technical cause. If uncertain: 'Likely cause: ...'\n\n" +
+        String guard = validateInput(bugReport);
+        if (guard != null) return guard;
+
+        return invoke(
+            "You are a senior debugging engineer at a high-traffic production system. " +
+            "You are paged at 3am for incidents. You think in root causes, not symptoms. " +
+            "Every statement you make references the exact error, function, line, or stack frame. " +
+            "You never guess without labeling it as a hypothesis.",
+
+            "Diagnose this bug report and deliver a production-grade fix.\n\n" +
+
+            "## Severity Classification\n" +
+            "P0 (Production down) / P1 (Critical degradation) / P2 (Functional bug) / P3 (Minor)\n" +
+            "Justification: one sentence.\n\n" +
+
+            "## Incident Fingerprint\n" +
+            "Type: NullPointerException / Logic Error / Race Condition / Memory Leak / Config Error / API Contract Violation / Other\n" +
+            "Location: [exact function name, line number, or module — from bug report]\n\n" +
+
+            "## What Failed (Plain Language)\n" +
+            "Explain what went wrong in 1–2 sentences. No technical jargon — write as you would explain to a product manager.\n\n" +
+
+            "## Root Cause (Technical)\n" +
+            "The precise technical reason. If you are certain: state it directly.\n" +
+            "If you are inferring: prefix with 'Hypothesis: '\n" +
+            "Reference the exact error message, stack trace line, or code pattern.\n\n" +
+
+            "## Reproduction Path\n" +
+            "Step-by-step sequence that causes this bug (based on bug report evidence only).\n" +
+            "If unclear: 'Reproduction path unclear from available data.'\n\n" +
+
             "## Fix\n" +
-            "The exact corrected code or command. If uncertain: prefix with 'Likely Fix:'.\n\n" +
+            "The exact corrected code, configuration, or command.\n" +
+            "If multiple approaches exist, show the safest production fix first.\n" +
+            "Label uncertain fixes: 'Likely Fix: '\n\n" +
+
+            "## Blast Radius\n" +
+            "What else could this bug affect? Other functions, endpoints, or data affected.\n\n" +
+
+            "## Verification\n" +
+            "How to confirm the fix worked. Test command, log line, or metric to check.\n\n" +
             "---BUG REPORT---\n" + bugReport,
-            model, 700, T_ANALYSIS);
+            model, 800, T_ANALYSIS);
     }
 
     // ── QA — WITH EXPLICIT DOCUMENT ───────────────────────────────────────────

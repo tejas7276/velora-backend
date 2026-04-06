@@ -152,12 +152,17 @@ public final class PromptRouter {
     private static String analysisBase(DocType docType) {
         return switch (docType) {
             case RESUME ->
-                "You are a senior HR analyst and recruiter. " +
-                "Analyze resumes with a hiring lens. " +
-                "Reference specific resume content in every observation.";
+                "You are a Head of Talent at a tier-1 tech company. " +
+                "You evaluate resumes with commercial precision — you hire or reject people for a living. " +
+                "Every claim you make references specific resume content (project name, technology, company, date). " +
+                "You distinguish between: STATED (in the resume) / INFERRED (logical conclusion) / ASSUMED (not in resume). " +
+                "You never inflate a candidate's profile. You identify both strengths and gaps with equal rigor.";
             case CODE ->
-                "You are a principal software engineer. " +
-                "All code feedback must reference specific patterns in the submitted code.";
+                "You are a principal engineer at a high-scale production system. " +
+                "You review code for correctness, security, and production-readiness. " +
+                "Every observation names the exact function, variable, or line pattern you are commenting on. " +
+                "You never give generic advice. You only flag real issues you can see in the provided code. " +
+                "If you cannot verify an issue exists, you do not mention it.";
             case DATA ->
                 "You are a senior business analyst. " +
                 "Analyze only the data provided. Never invent statistics or percentages.";
@@ -182,9 +187,14 @@ public final class PromptRouter {
     private static String generationBase(DocType docType) {
         return switch (docType) {
             case RESUME ->
-                "You are a professional resume and career writer. " +
-                "Create content grounded in the provided background. " +
-                "Never exaggerate or invent credentials.";
+                "You are a senior career content strategist who writes LinkedIn profiles and resume content " +
+                "for engineers who get hired at FAANG companies. " +
+                "Your content is evidence-locked: every sentence maps to a specific fact from the input. " +
+                "You NEVER use: results-driven, passionate, hardworking, motivated, detail-oriented. " +
+                "You NEVER invent tools, technologies, companies, or achievements. " +
+                "If the input is a URL, respond with STATUS: FAILED — you cannot read external pages. " +
+                "If a section has no data, write INSUFFICIENT DATA for that section only. " +
+                "NEVER output placeholders like [ADD YOUR OWN].";
             case EMAIL ->
                 "You are an enterprise-grade email generation engine.\n\n" +
 
@@ -246,10 +256,12 @@ public final class PromptRouter {
                 "- If document is insufficient: write INSUFFICIENT_DATA\n" +
                 "- Mark any supplemented info with [General Knowledge].";
             case GENERATION ->
-                "\n\nGROUNDING RULES (LIGHT):\n" +
-                "- Ground generated content in the provided context.\n" +
-                "- If key information is missing: mark as [ADD YOUR OWN: description]\n" +
-                "- Do not exaggerate or invent credentials.";
+                "\n\nGROUNDING RULES (STRICT FOR GENERATION):\n" +
+                "- Base ALL generated content on facts explicitly present in the input.\n" +
+                "- If a field has no supporting data in the input: write INSUFFICIENT DATA — not a placeholder.\n" +
+                "- NEVER output [ADD YOUR OWN], [placeholder], or [description] — these are forbidden.\n" +
+                "- DO NOT invent names, technologies, companies, metrics, or achievements.\n" +
+                "- If input is a URL: respond with STATUS: FAILED — you cannot access external URLs.";
         };
     }
 
