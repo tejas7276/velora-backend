@@ -7,6 +7,7 @@ import org.springframework.data.domain.*;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.security.Principal;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -23,9 +24,28 @@ public class UserController {
             @RequestParam(defaultValue = "10") int limit,
             @RequestParam(required = false) String search,
             @RequestParam(defaultValue = "createdAt") String sortBy,
-            @RequestParam(defaultValue = "desc") String order
+            @RequestParam(defaultValue = "desc") String order,
+            Principal principal
     ) {
 
+        // 🔒 SECURITY CHECK (ONLY YOUR EMAIL ALLOWED)
+        if (principal == null) {
+            return ResponseEntity.status(401).body(Map.of(
+                    "status", "error",
+                    "message", "Unauthorized - Please login"
+            ));
+        }
+
+        String email = principal.getName();
+
+        if (email == null || !email.equalsIgnoreCase("tejasshinde7276@gmail.com")) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "status", "error",
+                    "message", "Access Denied - Not authorized"
+            ));
+        }
+
+        // 📊 SORTING
         Sort sort = order.equalsIgnoreCase("asc")
                 ? Sort.by(sortBy).ascending()
                 : Sort.by(sortBy).descending();
@@ -34,15 +54,17 @@ public class UserController {
 
         Page<User> userPage;
 
-        if (search != null && !search.isEmpty()) {
+        // 🔍 SEARCH
+        if (search != null && !search.trim().isEmpty()) {
             userPage = userRepository
                     .findByNameContainingIgnoreCaseOrEmailContainingIgnoreCase(
-                            search, search, pageable
+                            search.trim(), search.trim(), pageable
                     );
         } else {
             userPage = userRepository.findAll(pageable);
         }
 
+        // 📦 RESPONSE
         Map<String, Object> response = new HashMap<>();
         response.put("status", "success");
         response.put("count", userPage.getTotalElements());
